@@ -52,7 +52,7 @@ export default function Login() {
       }
 
       // Step 4: Check if user has required permissions
-      if (profile.role != 1 || profile.usertype != 'inventory') {
+      if (profile.role != 2 || profile.usertype != 'inventory') {
         setError("You don't have permission to access this dashboard.");
         setLoading(false);
         // Optional: Sign out the user if they don't have permissions

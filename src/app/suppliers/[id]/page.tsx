@@ -3,9 +3,17 @@ import { useParams } from 'next/navigation';
 import { supabase } from '@/supabase/supabaseClient';
 import { useEffect, useState } from 'react';
 
+interface Supplier {
+  id: string;
+  name: string; // Added the missing 'name' property
+  contact: string;
+  email?: string;
+  address?: string;
+  created_at: string;
+}
 export default function SupplierDetail() {
   const params = useParams();
-  const [supplier, setSupplier] = useState<any>(null);
+  const [supplier, setSupplier] = useState<Supplier | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -29,7 +37,14 @@ export default function SupplierDetail() {
     fetchSupplier();
   }, [params.id]);
 
-  if (loading) return <div>Loading...</div>;
+  if (loading) return <div className="flex-1 ml-16 p-6 flex items-center justify-center">
+  <div className="animate-pulse flex space-x-2 items-center mt-50">
+    <div className="h-2 w-2 bg-red-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+    <div className="h-2 w-2 bg-orange-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+    <div className="h-2 w-2 bg-yellow-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+    <span className="ml-2 text-green-500 font-large">Loading...</span>
+  </div>
+</div>;
   if (!supplier) return <div>Supplier not found</div>;
 
   return (

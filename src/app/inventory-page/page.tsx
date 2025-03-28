@@ -5,6 +5,7 @@ import Sidebar from '../inventory/components/sidebar';
 import { createClient } from '@supabase/supabase-js';
 import * as XLSX from 'xlsx';
 
+
 // Initialize Supabase client
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
@@ -20,6 +21,13 @@ interface StockItem {
   supplier_id: number;
   supplier_name: string;
   created_at: string;
+  lpo_id: number;
+  purchase_lpo?: {
+    lpo_number: string;
+  };
+  suppliers?: {
+    name: string;
+  };
 }
 
 interface StockOutRecord {
@@ -38,34 +46,93 @@ interface Supplier {
   contact: string;
 }
 
+interface LPO {
+  id: number;
+  lpo_number: string;
+  status: string;
+  supplier_id: number;
+  suppliers: {
+    name: string;
+  } | null | undefined | Array<{ name: string }>;
+}
+
+interface SystemLog {
+  id: number;
+  action: string;
+  details: string;
+  created_by: string;
+  created_at: string;
+}
+
 const InventoryModule = () => {
-  // State for stock items
   const [stockItems, setStockItems] = useState<StockItem[]>([]);
   const [stockOutRecords, setStockOutRecords] = useState<StockOutRecord[]>([]);
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [, setSuppliers] = useState<Supplier[]>([]);
+  const [activeLPOs, setActiveLPOs] = useState<LPO[]>([]);
+  const [systemLogs, setSystemLogs] = useState<SystemLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Selected items for details view
-  const [selectedItem, setSelectedItem] = useState<StockItem | null>(null);
-  const [itemToEdit, setItemToEdit] = useState<StockItem | null>(null);
+  const [currentUser, setCurrentUser] = useState<string>('');
 
   // Modal states
-  const [isAddItemModalOpen, setIsAddItemModalOpen] = useState(false);
-  const [isEditItemModalOpen, setIsEditItemModalOpen] = useState(false);
-  const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
+  const [isAddStockModalOpen, setIsAddStockModalOpen] = useState(false);
   const [isAddStockOutModalOpen, setIsAddStockOutModalOpen] = useState(false);
 
-  // Form state for new item
-  const [newItem, setNewItem] = useState({
-    lpo_number: '',
+  // Form state for new stock item
+  const [newStockItem, setNewStockItem] = useState<{
+    name: string;
+    grn_number: string;
+    lpo_id: number;
+    quantity: number;
+    cost: number;
+    supplier_id: number;
+    supplier_name: string;
+  }>({
+    name: '',
+    grn_number: '',
+    lpo_id: 0,
+    quantity: 0,
+    cost: 0,
     supplier_id: 0,
-    status: 'Active',
-    amount: 0,
+    supplier_name: ''
   });
 
   // Toggle between Stock In and Stock Out
   const [activeTab, setActiveTab] = useState<'stockIn' | 'stockOut'>('stockIn');
+
+  // Get current user on component mount
+  useEffect(() => {
+    const getCurrentUser = async () => {
+      try {
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        
+        if (authError) throw authError;
+        
+        if (user) {
+          const { data: profile, error: profileError } = await supabase
+            .from('users')
+            .select('name')
+            .eq('id', user.id)
+            .single();
+          
+          if (profileError) {
+            console.warn('Profile not found, using email instead:', profileError.message);
+            setCurrentUser(user.email || 'System');
+          } else {
+            setCurrentUser(profile?.name || user.email || 'System');
+          }
+        } else {
+          setCurrentUser('System');
+        
+        }
+      } catch (err) {
+        console.error('Error getting current user:', err);
+        setCurrentUser('System');
+      }
+    };
+    
+    getCurrentUser();
+  }, []);
 
   // Fetch data from Supabase
   useEffect(() => {
@@ -73,20 +140,17 @@ const InventoryModule = () => {
       try {
         setLoading(true);
         
-        // Fetch stock items
+        // Fetch stock items with supplier and LPO info
         const { data: stockData, error: stockError } = await supabase
           .from('stock_items')
-          .select(`
-            *,
-            suppliers (name)
-          `);
+          .select(`*, suppliers (name), purchase_lpo (lpo_number)`);
         
         if (stockError) throw stockError;
         
-        // Format stock items with supplier name
         const formattedStockItems = stockData.map(item => ({
           ...item,
-          supplier_name: item.suppliers?.name || 'Unknown'
+          supplier_name: item.suppliers?.name || 'Unknown',
+          lpo_number: item.purchase_lpo?.lpo_number || ''
         }));
         setStockItems(formattedStockItems);
 
@@ -106,6 +170,41 @@ const InventoryModule = () => {
         if (supplierError) throw supplierError;
         setSuppliers(supplierData);
 
+        // Fetch active LPOs with supplier info
+        const { data: lpoData, error: lpoError } = await supabase
+          .from('purchase_lpo')
+          .select(`
+            id, 
+            lpo_number, 
+            status,
+            supplier_id,
+            suppliers (name)
+          `)
+          .eq('status', 'Active');
+
+        if (lpoError) throw lpoError;
+
+        const formattedLPOs = lpoData.map(lpo => ({
+          id: lpo.id,
+          lpo_number: lpo.lpo_number,
+          status: lpo.status,
+          supplier_id: lpo.supplier_id,
+          supplier_name: Array.isArray(lpo.suppliers) ? lpo.suppliers[0]?.name || 'Unknown' : (lpo.suppliers as { name: string } | null)?.name ?? 'Unknown',
+          suppliers: Array.isArray(lpo.suppliers) ? lpo.suppliers[0] || null : lpo.suppliers || null
+        }));
+
+        setActiveLPOs(formattedLPOs);
+
+        // Fetch system logs
+        const { data: logsData, error: logsError } = await supabase
+          .from('system_logs')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(10);
+        
+        if (logsError) throw logsError;
+        setSystemLogs(logsData || []);
+
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to fetch data');
         console.error('Error fetching data:', err);
@@ -117,81 +216,95 @@ const InventoryModule = () => {
     fetchData();
   }, []);
 
+  // Handle LPO selection change
+  const handleLPOChange = (lpoId: number) => {
+    const selectedLPO = activeLPOs.find(lpo => lpo.id === lpoId);
+    if (selectedLPO) {
+      setNewStockItem({
+        ...newStockItem,
+        lpo_id: selectedLPO.id,
+        supplier_id: selectedLPO.supplier_id,
+        supplier_name: Array.isArray(selectedLPO.suppliers) 
+          ? selectedLPO.suppliers[0]?.name || 'Unknown' 
+          : selectedLPO.suppliers?.name || 'Unknown'
+      });
+    } else {
+      setNewStockItem({
+        ...newStockItem,
+        lpo_id: 0,
+        supplier_id: 0,
+        supplier_name: ''
+      });
+    }
+  };
+
   // Add new stock item
   const addStockItem = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       const { data, error } = await supabase
-        .from('purchase_lpo')
-        .insert([newItem])
+        .from('stock_items')
+        .insert([{
+          name: newStockItem.name,
+          grn_number: newStockItem.grn_number,
+          lpo_id: newStockItem.lpo_id,
+          quantity: newStockItem.quantity,
+          cost: newStockItem.cost,
+          supplier_id: newStockItem.supplier_id
+        }])
         .select();
-      
+
       if (error) throw error;
-      
+
       if (data && data.length > 0) {
+        const { data: completeItem, error: fetchError } = await supabase
+          .from('stock_items')
+          .select(`
+            *,
+            suppliers (name),
+            purchase_lpo (lpo_number)
+          `)
+          .eq('id', data[0].id)
+          .single();
+
+        if (fetchError) throw fetchError;
+
         const addedItem = {
-          ...data[0],
-          supplier_name: suppliers.find(s => s.id === newItem.supplier_id)?.name || 'Unknown'
+          ...completeItem,
+          supplier_name: completeItem.suppliers?.name || 'Unknown',
+          lpo_number: completeItem.purchase_lpo?.lpo_number || ''
         };
         setStockItems([...stockItems, addedItem]);
-        setIsAddItemModalOpen(false);
-        setNewItem({
-          lpo_number: '',
-          supplier_id: 0,
-          status: 'Active',
-          amount: 0,
-        });
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to add item');
-      console.error('Error adding item:', err);
-    }
-  };
 
-  // Edit stock item
-  const editStockItem = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!itemToEdit) return;
-    
-    try {
-      const { data, error } = await supabase
-        .from('stock_items')
-        .update(itemToEdit)
-        .eq('id', itemToEdit.id)
-        .select();
-      
-      if (error) throw error;
-      
-      if (data && data.length > 0) {
-        const updatedItem = {
-          ...data[0],
-          supplier_name: suppliers.find(s => s.id === itemToEdit.supplier_id)?.name || 'Unknown'
-        };
-        setStockItems(stockItems.map(item => 
-          item.id === updatedItem.id ? updatedItem : item
-        ));
-        setIsEditItemModalOpen(false);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update item');
-      console.error('Error updating item:', err);
-    }
-  };
+      setNewStockItem({
+        name: '',
+        grn_number: '',
+        lpo_id: 0,
+        quantity: 0,
+        cost: 0,
+        supplier_id: 0,
+        supplier_name: ''
+      });
+       // Create system log for stock out
+       const { data: logData, error: logError } = await supabase
+       .from('system_logs')
+       .insert([{
+         action: 'Stock In',
+         details: `Added ${newStockItem.quantity} units of ${newStockItem.name} to inventory`,
+         created_by: currentUser
+       }])
+       .select();
+     
+     if (logError) throw logError;
 
-  // Delete stock item
-  const deleteStockItem = async (id: number) => {
-    try {
-      const { error } = await supabase
-        .from('stock_items')
-        .delete()
-        .eq('id', id);
-      
-      if (error) throw error;
-      
-      setStockItems(stockItems.filter(item => item.id !== id));
+     if (logData && logData.length > 0) {
+       setSystemLogs([logData[0], ...systemLogs]);
+     }
+      setIsAddStockModalOpen(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete item');
-      console.error('Error deleting item:', err);
+      setError(err instanceof Error ? err.message : 'Failed to add stock item');
+      console.error('Error adding stock item:', err);
     }
   };
 
@@ -208,7 +321,7 @@ const InventoryModule = () => {
       if (!product) throw new Error('Product not found');
       
       if (product.quantity < quantity) {
-        throw new Error('Insufficient stock');
+        alert('Stock is insufficient for this item');
       }
       
       // Add stock out record
@@ -220,7 +333,7 @@ const InventoryModule = () => {
           quantity: quantity,
           takenby: form.takenBy.value,
           issuedby: form.issuedBy.value,
-          created_at: form.date.value,
+          created_at: new Date().toISOString(),
         }])
         .select();
       
@@ -243,6 +356,22 @@ const InventoryModule = () => {
             ? { ...item, quantity: item.quantity - quantity } 
             : item
         ));
+
+        // Create system log for stock out
+        const { data: logData, error: logError } = await supabase
+          .from('system_logs')
+          .insert([{
+            action: 'Stock Out',
+            details: `Issued ${quantity} units of ${product.name} to ${form.takenBy.value}`,
+            created_by: currentUser
+          }])
+          .select();
+        
+        if (logError) throw logError;
+
+        if (logData && logData.length > 0) {
+          setSystemLogs([logData[0], ...systemLogs]);
+        }
         
         setIsAddStockOutModalOpen(false);
       }
@@ -290,13 +419,14 @@ const InventoryModule = () => {
   const lowStockItems = stockItems.filter(item => item.quantity <= 5).slice(0, 5);
 
   if (loading) return <div className="flex-1 ml-16 p-6 flex items-center justify-center">
-  <div className="animate-pulse flex space-x-2 items-center mt-50">
-    <div className="h-2 w-2 bg-red-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-    <div className="h-2 w-2 bg-orange-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-    <div className="h-2 w-2 bg-yellow-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
-    <span className="ml-2 text-green-500 font-medium">Loading...</span>
-  </div>
-</div>;
+    <div className="animate-pulse flex space-x-2 items-center mt-50">
+      <div className="h-2 w-2 bg-red-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+      <div className="h-2 w-2 bg-orange-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+      <div className="h-2 w-2 bg-yellow-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+      <span className="ml-2 text-green-500 font-medium">Loading...</span>
+    </div>
+  </div>;
+
   if (error) return <div className="flex-1 ml-16 p-6 text-red-500">Error: {error}</div>;
 
   return (
@@ -315,38 +445,39 @@ const InventoryModule = () => {
         </div>
 
         {/* Low Stock Alert */}
-        <div className="bg-white rounded-lg shadow-md p-6 mb-8 text-black">
-          <h2 className="text-xl font-semibold mb-4">Low Stock Alert</h2>
-          <div className="overflow-x-auto">
-            <table className="min-w-full bg-white">
-              <thead>
-                <tr className="bg-gray-100">
-                  <th className="py-3 px-4 text-left">Name</th>
-                  <th className="py-3 px-4 text-left">LPO</th>
-                  <th className="py-3 px-4 text-left">Stock remaining</th>
-                </tr>
-              </thead>
-              <tbody>
-                {lowStockItems.map((item) => (
-                  <tr key={item.id} className="border-b">
-                    <td className="py-3 px-4 text-red-500">{item.name}</td>
-                    <td className="py-3 px-4 text-red-500">{item.lpo_number}</td>
-                    <td className="py-3 px-4 text-red-500">{item.quantity}</td>
+        {lowStockItems.length > 0 && (
+          <div className="bg-white rounded-lg shadow-md p-6 mb-8 text-black">
+            <h2 className="text-xl font-semibold mb-4">Low Stock Alert</h2>
+            <div className="overflow-x-auto">
+              <table className="min-w-full bg-white">
+                <thead>
+                  <tr className="bg-gray-100">
+                    <th className="py-3 px-4 text-left">Name</th>
+                    <th className="py-3 px-4 text-left">LPO</th>
+                    <th className="py-3 px-4 text-left">Stock remaining</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {lowStockItems.map((item) => (
+                    <tr key={item.id} className="border-b">
+                      <td className="py-3 px-4 text-red-500">{item.name}</td>
+                      <td className="py-3 px-4 text-red-500">{item.lpo_number}</td>
+                      <td className="py-3 px-4 text-red-500">{item.quantity}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-4 text-right">
+              <button 
+                className="text-blue-500 hover:text-blue-700 font-medium"
+                onClick={() => setActiveTab('stockIn')}
+              >
+                View Full List →
+              </button>
+            </div>
           </div>
-          {/* View Full List Button */}
-          <div className="mt-4 text-right">
-            <button 
-              className="text-blue-500 hover:text-blue-700 font-medium"
-              onClick={() => setActiveTab('stockIn')}
-            >
-              View Full List →
-            </button>
-          </div>
-        </div>
+        )}
 
         {/* Toggle Buttons for Stock In and Stock Out */}
         <div className="flex justify-between items-center mb-6">
@@ -425,6 +556,12 @@ const InventoryModule = () => {
           <div className="bg-white rounded-lg shadow-md p-6 mb-8 text-black">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-semibold">Stock In</h2>
+              <button
+                onClick={() => setIsAddStockModalOpen(true)}
+                className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600"
+              >
+                Add Stock
+              </button>
             </div>
             <div className="overflow-x-auto">
               <table className="min-w-full bg-white">
@@ -437,56 +574,23 @@ const InventoryModule = () => {
                     <th className="py-3 px-4 text-left">Cost</th>
                     <th className="py-3 px-4 text-left">Supplier</th>
                     <th className="py-3 px-4 text-left">Date</th>
-                    <th className="py-3 px-4 text-left">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {stockItems.map((item) => (
                     <tr 
                       key={item.id} 
-                      className={`border-b ${item.quantity <= 5 ? 'bg-red-500 animate-pulse' : ''}`}
+                      className={`border-b ${item.quantity <= 5 ? 'bg-red-50' : ''}`}
                     >
                       <td className="py-3 px-4">{item.name}</td>
                       <td className="py-3 px-4">{item.lpo_number}</td>
                       <td className="py-3 px-4">{item.grn_number}</td>
-                      <td className={`py-3 px-4 relative ${item.quantity <= 5 ? 'text-black-500 font-bold group' : ''}`}>
-                      {item.quantity}
-                      {item.quantity <= 5 && (
-                        <span className="absolute invisible group-hover:visible bg-gray-800 text-white text-xs rounded py-1                     px-2 bottom-full left-1/2 transform -translate-x-1/2 whitespace-nowrap z-10">
-                          Stock is running low, please add!
-                          <span className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4                     border-r-4 border-b-0 border-t-4 border-gray-800 border-solid"></span>
-                        </span>
-                      )}
-                    </td>
-                      <td className="py-3 px-4">UGX {item.cost}</td>
+                      <td className={`py-3 px-4 ${item.quantity <= 5 ? 'text-red-500 font-bold' : ''}`}>
+                        {item.quantity}
+                      </td>
+                      <td className="py-3 px-4">UGX {item.cost.toLocaleString()}</td>
                       <td className="py-3 px-4">{item.supplier_name}</td>
                       <td className="py-3 px-4">{new Date(item.created_at).toLocaleDateString()}</td>
-                      <td className="py-3 px-4">
-                        <button
-                          onClick={() => {
-                            setItemToEdit(item);
-                            setIsEditItemModalOpen(true);
-                          }}
-                          className="text-blue-500 hover:text-blue-700 mr-2"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => deleteStockItem(item.id)}
-                          className="text-red-500 hover:text-red-700 mr-2"
-                        >
-                          Delete
-                        </button>
-                        <button
-                          onClick={() => {
-                            setSelectedItem(item);
-                            setIsDetailsModalOpen(true);
-                          }}
-                          className="text-green-500 hover:text-green-700"
-                        >
-                          Details
-                        </button>
-                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -533,49 +637,90 @@ const InventoryModule = () => {
             </div>
           </div>
         )}
-
-        {/* Add Item Modal */}
-        {isAddItemModalOpen && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-            <div className="bg-white p-6 rounded-lg w-96">
-              <h2 className="text-xl font-semibold mb-4">Add New LPO</h2>
+        {/* Add Stock Modal */}
+        {isAddStockModalOpen && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white p-6 rounded-lg w-full max-w-md max-h-[90vh] overflow-y-auto text-black">
+              <h2 className="text-xl font-semibold mb-4">Add New Stock</h2>
               <form onSubmit={addStockItem}>
                 <div className="space-y-4">
-                  <input
-                    type="text"
-                    placeholder="LPO Number"
-                    className="w-full p-2 border rounded-lg"
-                    required
-                    value={newItem.lpo_number}
-                    onChange={(e) => setNewItem({...newItem, lpo_number: e.target.value})}
-                  />
-                  <label>LPO Amount</label>
-                  <input
-                    type="text"
-                    placeholder="LPO amount"
-                    className="w-full p-2 border rounded-lg"
-                    required
-                    value={newItem.amount}
-                    onChange={(e) => setNewItem({...newItem, amount: parseFloat(e.target.value) || 0})}
-                  />
-                  <select
-                    className="w-full p-2 border rounded-lg"
-                    required
-                    value={newItem.supplier_id}
-                    onChange={(e) => setNewItem({...newItem, supplier_id: parseInt(e.target.value) || 0})}
-                  >
-                    <option value="">Select Supplier</option>
-                    {suppliers.map(supplier => (
-                      <option key={supplier.id} value={supplier.id}>
-                        {supplier.name}
-                      </option>
-                    ))}
-                  </select>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Item Name</label>
+                    <input
+                      type="text"
+                      placeholder="Enter item name"
+                      className="w-full p-2 border rounded-lg"
+                      required
+                      value={newStockItem.name}
+                      onChange={(e) => setNewStockItem({...newStockItem, name: e.target.value})}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">GRN Number</label>
+                    <input
+                      type="text"
+                      placeholder="Enter GRN number"
+                      className="w-full p-2 border rounded-lg"
+                      required
+                      value={newStockItem.grn_number}
+                      onChange={(e) => setNewStockItem({...newStockItem, grn_number: e.target.value})}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">LPO</label>
+                    <select
+                      className="w-full p-2 border rounded-lg"
+                      required
+                      value={newStockItem.lpo_id}
+                      onChange={(e) => handleLPOChange(parseInt(e.target.value))}
+                    >
+                      <option value="">Select LPO</option>
+                      {activeLPOs.map(lpo => (
+                        <option key={lpo.id} value={lpo.id}>
+                          {lpo.lpo_number}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
+                    <input
+                      type="text"
+                      className="w-full p-2 border rounded-lg bg-gray-100"
+                      readOnly
+                      value={newStockItem.supplier_name || 'Select LPO to auto-fill supplier'}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Quantity</label>
+                    <input
+                      type="number"
+                      placeholder="Enter quantity"
+                      className="w-full p-2 border rounded-lg"
+                      required
+                      min="1"
+                      value={newStockItem.quantity}
+                      onChange={(e) => setNewStockItem({...newStockItem, quantity: parseInt(e.target.value)})}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Cost Price (UGX)</label>
+                    <input
+                      type="number"
+                      placeholder="Enter cost price"
+                      className="w-full p-2 border rounded-lg"
+                      required
+                      min="0"
+                      step="0.01"
+                      value={newStockItem.cost}
+                      onChange={(e) => setNewStockItem({...newStockItem, cost: parseFloat(e.target.value)})}
+                    />
+                  </div>
                 </div>
                 <div className="mt-6 flex justify-end space-x-4">
                   <button
                     type="button"
-                    onClick={() => setIsAddItemModalOpen(false)}
+                    onClick={() => setIsAddStockModalOpen(false)}
                     className="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600"
                   >
                     Cancel
@@ -584,179 +729,69 @@ const InventoryModule = () => {
                     type="submit"
                     className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600"
                   >
-                    Add
+                    Add Stock
                   </button>
                 </div>
               </form>
-            </div>
-          </div>
-        )}
-
-        {/* Edit Item Modal */}
-        {isEditItemModalOpen && itemToEdit && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-            <div className="bg-white p-6 rounded-lg w-96 text-black">
-              <h2 className="text-xl font-semibold mb-4">Edit Stock Item</h2>
-              <form onSubmit={editStockItem}>
-                <div className="space-y-4">
-                  <input
-                    type="text"
-                    className="w-full p-2 border rounded-lg"
-                    required
-                    value={itemToEdit.name}
-                    onChange={(e) => setItemToEdit({...itemToEdit, name: e.target.value})}
-                  />
-                  <input
-                    type="text"
-                    className="w-full p-2 border rounded-lg"
-                    required
-                    value={itemToEdit.lpo_number}
-                    onChange={(e) => setItemToEdit({...itemToEdit, lpo_number: e.target.value})}
-                  />
-                  <input
-                    type="text"
-                    className="w-full p-2 border rounded-lg"
-                    required
-                    value={itemToEdit.grn_number}
-                    onChange={(e) => setItemToEdit({...itemToEdit, grn_number: e.target.value})}
-                  />
-                  <input
-                    type="number"
-                    className="w-full p-2 border rounded-lg"
-                    required
-                    min="0"
-                    value={itemToEdit.quantity}
-                    onChange={(e) => setItemToEdit({...itemToEdit, quantity: parseInt(e.target.value) || 0})}
-                  />
-                  <input
-                    type="number"
-                    className="w-full p-2 border rounded-lg"
-                    required
-                    min="0"
-                    step="0.01"
-                    value={itemToEdit.cost}
-                    onChange={(e) => setItemToEdit({...itemToEdit, cost: parseFloat(e.target.value) || 0})}
-                  />
-                  <select
-                    className="w-full p-2 border rounded-lg"
-                    required
-                    value={itemToEdit.supplier_id}
-                    onChange={(e) => setItemToEdit({...itemToEdit, supplier_id: parseInt(e.target.value) || 0})}
-                  >
-                    {suppliers.map(supplier => (
-                      <option key={supplier.id} value={supplier.id}>
-                        {supplier.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="mt-6 flex justify-end space-x-4">
-                  <button
-                    type="button"
-                    onClick={() => setIsEditItemModalOpen(false)}
-                    className="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600"
-                  >
-                    Save
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {/* Item Details Modal */}
-        {isDetailsModalOpen && selectedItem && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-            <div className="bg-white p-6 rounded-lg w-96 text-black">
-              <h2 className="text-xl font-semibold mb-4">Item Details</h2>
-              <div className="space-y-4">
-                <p>
-                  <strong>Product Name:</strong> {selectedItem.name}
-                </p>
-                <p>
-                  <strong>LPO Number:</strong> {selectedItem.lpo_number}
-                </p>
-                <p>
-                  <strong>GRN Number:</strong> {selectedItem.grn_number}
-                </p>
-                <p>
-                  <strong>Stock Quantity:</strong> {selectedItem.quantity}
-                </p>
-                <p>
-                  <strong>Cost:</strong> UGX {selectedItem.cost.toLocaleString()}
-                </p>
-                <p>
-                  <strong>Supplier:</strong> {selectedItem.supplier_name}
-                </p>
-                <h3 className="text-lg font-semibold mt-4">Stock Movements</h3>
-                <p>No stock movements available.</p>
-              </div>
-              <div className="mt-6 flex justify-end">
-                <button
-                  onClick={() => setIsDetailsModalOpen(false)}
-                  className="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600"
-                >
-                  Close
-                </button>
-              </div>
             </div>
           </div>
         )}
 
         {/* Add Stock Out Modal */}
         {isAddStockOutModalOpen && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
             <div className="bg-white p-6 rounded-lg w-96 text-black">
               <h2 className="text-xl font-semibold mb-4">Add Stock Out Record</h2>
               <form onSubmit={addStockOutRecord}>
                 <div className="space-y-4">
-                  <select
-                    name="productId"
-                    className="w-full p-2 border rounded-lg"
-                    required
-                  >
-                    <option value="">Select Product</option>
-                    {stockItems.map(item => (
-                      <option key={item.id} value={item.id}>
-                        {item.name} (Stock: {item.quantity})
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="number"
-                    name="quantity"
-                    placeholder="Quantity"
-                    className="w-full p-2 border rounded-lg"
-                    required
-                    min="1"
-                  />
-                  <input
-                    type="text"
-                    name="takenBy"
-                    placeholder="Taken By"
-                    className="w-full p-2 border rounded-lg"
-                    required
-                  />
-                  <input
-                    type="text"
-                    name="issuedBy"
-                    placeholder="Issued By"
-                    className="w-full p-2 border rounded-lg"
-                    required
-                  />
-                  <input
-                    type="date"
-                    name="date"
-                    defaultValue={new Date().toISOString().split('T')[0]}
-                    className="w-full p-2 border rounded-lg"
-                    required
-                  />
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Product</label>
+                    <select
+                      name="productId"
+                      className="w-full p-2 border rounded-lg"
+                      required
+                    >
+                      <option value="">Select Product</option>
+                      {stockItems.map(item => (
+                        <option key={item.id} value={item.id}>
+                          {item.name} (Stock: {item.quantity})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Quantity</label>
+                    <input
+                      type="number"
+                      name="quantity"
+                      placeholder="Enter quantity"
+                      className="w-full p-2 border rounded-lg"
+                      required
+                      min="1"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Taken By</label>
+                    <input
+                      type="text"
+                      name="takenBy"
+                      placeholder="Enter recipient name"
+                      className="w-full p-2 border rounded-lg"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Issued By</label>
+                    <input
+                      type="text"
+                      name="issuedBy"
+                      placeholder="Enter issuer name"
+                      className="w-full p-2 border rounded-lg"
+                      required
+                      value={currentUser}
+                      readOnly
+                    />
+                  </div>
                 </div>
                 <div className="mt-6 flex justify-end space-x-4">
                   <button
@@ -770,7 +805,7 @@ const InventoryModule = () => {
                     type="submit"
                     className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600"
                   >
-                    Add
+                    Record Stock Out
                   </button>
                 </div>
               </form>

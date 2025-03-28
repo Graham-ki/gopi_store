@@ -5,7 +5,15 @@ import { useEffect, useState } from 'react';
 
 export default function StockOutDetail() {
   const params = useParams();
-  const [record, setRecord] = useState<any>(null);
+  interface StockOutRecord {
+    name: string;
+    quantity: number;
+    takenby: string;
+    issuedby: string;
+    created_at: string;
+  }
+
+  const [record, setRecord] = useState<StockOutRecord | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -29,7 +37,14 @@ export default function StockOutDetail() {
     fetchRecord();
   }, [params.id]);
 
-  if (loading) return <div>Loading...</div>;
+  if (loading) return <div className="flex-1 ml-16 p-6 flex items-center justify-center">
+  <div className="animate-pulse flex space-x-2 items-center mt-50">
+    <div className="h-2 w-2 bg-red-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+    <div className="h-2 w-2 bg-orange-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+    <div className="h-2 w-2 bg-yellow-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+    <span className="ml-2 text-green-500 font-large">Loading...</span>
+  </div>
+</div>;
   if (!record) return <div>Record not found</div>;
 
   return (

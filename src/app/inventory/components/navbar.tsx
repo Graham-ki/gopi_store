@@ -1,15 +1,26 @@
 'use client';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/supabase/supabaseClient';
 import { FiSearch, FiX } from 'react-icons/fi';
 
+const DEBOUNCE_DELAY = 300;
+
+type SearchResult = {
+  id: number;
+  type: 'supplier' | 'stock_item' | 'stock_out' | 'lpo';
+  name: string;
+  extraInfo?: string;
+  route: string;
+};
+
 const Navbar = () => {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleLogout = async () => {
     try {
@@ -21,112 +32,128 @@ const Navbar = () => {
     }
   };
 
-  // Search across all relevant tables
-  const performSearch = async (query: string) => {
+  const searchTables = async (query: string) => {
     if (!query.trim()) {
       setSearchResults([]);
-      return;
+      return [];
     }
 
     setIsSearching(true);
     try {
-      // Search suppliers
-      const { data: suppliers } = await supabase
-        .from('suppliers')
-        .select('id, name, contact, email')
-        .or(`name.ilike.%${query}%,contact.ilike.%${query}%,email.ilike.%${query}%`);
+      const searchPromises = [
+        supabase.from('suppliers')
+          .select('id, name, contact, email')
+          .or(`name.ilike.%${query}%,contact.ilike.%${query}%,email.ilike.%${query}%`),
+        supabase.from('stock_items')
+          .select('id, name, quantity')
+          .ilike('name', `%${query}%`),
+        supabase.from('stock_out')
+          .select('id, name, quantity, takenby')
+          .or(`name.ilike.%${query}%,takenby.ilike.%${query}%`),
+        supabase.from('purchase_lpo')
+          .select('id, lpo_number, supplier_id, status')
+          .or(`lpo_number.ilike.%${query}%,status.ilike.%${query}%`)
+      ];
 
-      // Search stock items
-      const { data: stockItems } = await supabase
-      .from('stock_items')
-      .select('id, name, quantity')
-      .or(`name.ilike.%${query}%,quantity.ilike.%${query}%`);
-        
-    console.log('Stock items search results:', stockItems); // Debug log
-      // Search stock out records
-      const { data: stockOut } = await supabase
-        .from('stock_out')
-        .select('id, name, quantity, takenby')
-        .or(`name.ilike.%${query}%,takenby.ilike.%${query}%`);
+      const [
+        { data: suppliers, error: sError },
+        { data: stockItems, error: siError },
+        { data: stockOut, error: soError },
+        { data: lpos, error: lError }
+      ] = await Promise.all(searchPromises);
 
-      // Search LPOs
-      const { data: lpos } = await supabase
-        .from('purchase_lpo')
-        .select('id, lpo_number, supplier_id, status')
-        .or(`lpo_number.ilike.%${query}%,status.ilike.%${query}%`);
+      if (sError || siError || soError || lError) {
+        throw new Error('Search failed');
+      }
 
-      // Combine and format results
-      const results = [
-        ...(suppliers?.map(s => ({ ...s, type: 'supplier' })) || []),
-        ...(stockItems?.map(si => ({ ...si, type: 'stock_item' })) || []),
-        ...(stockOut?.map(so => ({ ...so, type: 'stock_out' })) || []),
-        ...(lpos?.map(l => ({ ...l, type: 'lpo' })) || [])
+      const results: SearchResult[] = [
+        ...(suppliers?.map(s => ({
+          id: s.id,
+          type: 'supplier' as const,
+          name: 'name' in s ? s.name : '',
+          extraInfo: 'email' in s ? s.email : undefined,
+          route: `/suppliers/${s.id}`
+        })) || []),
+        ...(stockItems?.map(si => ({
+          id: si.id,
+          type: 'stock_item' as const,
+          name: 'name' in si ? si.name : '',
+          extraInfo: 'quantity' in si ? `${si.quantity} in stock` : undefined,
+          route: `/stock-items/${si.id}`
+        })) || []),
+        ...(stockOut?.map(so => ({
+          id: so.id,
+          type: 'stock_out' as const,
+          name: 'name' in so ? so.name : '',
+          extraInfo: 'takenby' in so ? `Taken by ${so.takenby}` : undefined,
+          route: `/stock-out/${so.id}`
+        })) || []),
+        ...(lpos?.map(l => ({
+          id: l.id,
+          type: 'lpo' as const,
+          name: 'lpo_number' in l ? `LPO #${l.lpo_number}` : '',
+          extraInfo: 'status' in l ? l.status : undefined,
+          route: `/lpos/${l.id}`
+        })) || [])
       ];
 
       setSearchResults(results);
+      return results;
     } catch (error) {
       console.error('Search error:', error);
+      setSearchResults([]);
+      return [];
     } finally {
       setIsSearching(false);
     }
   };
 
-  // Debounce search
   useEffect(() => {
-    const timer = setTimeout(() => {
+    // Clear previous timeout
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+
+    // Set new timeout
+    timeoutRef.current = setTimeout(() => {
       if (searchQuery) {
-        performSearch(searchQuery);
+        searchTables(searchQuery);
         setShowResults(true);
       } else {
         setSearchResults([]);
         setShowResults(false);
       }
-    }, 300);
+    }, DEBOUNCE_DELAY);
 
-    return () => clearTimeout(timer);
+    // Cleanup
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    };
   }, [searchQuery]);
 
-  const handleResultClick = (result: any) => {
-    switch (result.type) {
-      case 'supplier':
-        router.push(`/suppliers/${result.id}`);
-        break;
-      case 'stock_item':
-        router.push(`/stock-items/${result.id}`);
-        break;
-      case 'stock_out':
-        router.push(`/stock-out/${result.id}`);
-        break;
-      case 'lpo':
-        router.push(`/lpos/${result.id}`);
-        break;
-      default:
-        break;
-    }
-    setSearchQuery('');
-    setShowResults(false);
+  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSearchQuery(e.target.value);
   };
 
-  const getDisplayText = (result: any) => {
-    switch (result.type) {
-      case 'supplier':
-        return `${result.name} (Supplier)`;
-      case 'stock_item':
-        return `${result.name} - ${result.quantity} in stock`;
-      case 'stock_out':
-        return `${result.name} - Taken by ${result.takenby}`;
-      case 'lpo':
-        return `LPO #${result.lpo_number} - ${result.status}`;
-      default:
-        return '';
-    }
+  const clearSearch = () => {
+    setSearchQuery('');
+    setShowResults(false);
+    setSearchResults([]);
   };
 
   return (
     <div className="fixed top-0 left-0 right-0 z-50 bg-gray-600 text-white shadow-lg">
       <div className="flex justify-between items-center p-2">
         {/* Title */}
-        <div className="text-xl font-bold cursor-pointer pl-4" onClick={() => router.push('/')}>
+        <div 
+          className="text-xl font-bold cursor-pointer pl-4" 
+          onClick={() => router.push('/')}
+          role="button"
+          tabIndex={0}
+          aria-label="Go to home page"
+        >
           MTS Management System
         </div>
 
@@ -139,44 +166,57 @@ const Navbar = () => {
               placeholder="Search suppliers, inventory, LPOs..."
               className="w-full pl-10 pr-8 py-2 rounded-lg bg-blue-400 text-white placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={handleSearchChange}
               onFocus={() => searchQuery && setShowResults(true)}
+              aria-label="Search"
+              aria-autocomplete="list"
+              aria-controls="search-results"
             />
             {searchQuery && (
               <FiX 
                 className="absolute right-3 top-3 text-gray-300 cursor-pointer"
-                onClick={() => {
-                  setSearchQuery('');
-                  setShowResults(false);
-                }}
+                onClick={clearSearch}
+                aria-label="Clear search"
               />
             )}
           </div>
           
           {/* Search Results Dropdown */}
           {showResults && searchQuery && (
-            <div className="absolute top-full left-0 right-0 bg-white text-black rounded-b-lg shadow-lg max-h-96 overflow-y-auto z-50 border border-gray-200">
+            <div 
+              id="search-results"
+              className="absolute top-full left-0 right-0 bg-white text-black rounded-b-lg shadow-lg max-h-96 overflow-y-auto z-50 border border-gray-200"
+              role="listbox"
+            >
               {isSearching ? (
                 <div className="p-4 text-center text-gray-500">Searching...</div>
               ) : searchResults.length > 0 ? (
                 <ul>
                   {searchResults.map((result) => (
                     <li 
-                      key={`${result.type}-${result.id}`}
+                      key={`${result.type}-${result.id}-${Math.random().toString(36).slice(2, 9)}`}
                       className="p-3 hover:bg-blue-50 cursor-pointer border-b border-gray-100"
-                      onClick={() => handleResultClick(result)}
+                      onClick={() => {
+                        router.push(result.route);
+                        clearSearch();
+                      }}
+                      role="menuitem"
                     >
-                      <div className="font-medium">{getDisplayText(result)}</div>
-                      <div className="text-xs text-gray-500 mt-1 capitalize">
-                        {result.type.replace('_', ' ')}
-                        {result.email && ` • ${result.email}`}
-                        {result.status && ` • ${result.status}`}
+                      <div className="font-medium">
+                        {result.type === 'lpo' ? result.name : `${result.name} (${result.type.replace('_', ' ')})`}
                       </div>
+                      {result.extraInfo && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          {result.extraInfo}
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>
               ) : (
-                <div className="p-4 text-center text-gray-500">No results found for "{searchQuery}"</div>
+                <div className="p-4 text-center text-gray-500">
+                  No results found for {searchQuery}
+                </div>
               )}
             </div>
           )}
@@ -184,27 +224,25 @@ const Navbar = () => {
 
         {/* Navigation Tabs */}
         <div className="flex space-x-2 pr-4">
-          <button
-            className="px-4 py-2 bg-blue-400 hover:bg-blue-800 rounded-t-lg transition-colors duration-200"
-            onClick={() => router.push('/suppliers')}
-          >
-            Suppliers
-          </button>
+          
           <button
             className="px-4 py-2 bg-blue-400 hover:bg-blue-800 rounded-t-lg transition-colors duration-200"
             onClick={() => router.push('/lpos')}
+            aria-label="Navigate to LPOs"
           >
             LPOs
           </button>
           <button
             className="px-4 py-2 bg-blue-400 hover:bg-blue-800 rounded-t-lg transition-colors duration-200"
-            onClick={() => router.push('/inventory')}
+            onClick={() => router.push('/inventory-page')}
+            aria-label="Navigate to inventory"
           >
             Inventory
           </button>
           <button
             className="px-4 py-2 bg-red-700 hover:bg-red-500 rounded-t-lg transition-colors duration-200"
             onClick={handleLogout}
+            aria-label="Logout"
           >
             Exit
           </button>
